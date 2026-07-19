@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-Claude Code 全局 Hook 通知系统。当 Claude Code 需要用户权限时，右下角弹出交互式通知窗口，用户可直接点击按钮选择 **Yes / No**，响应以 `hookSpecificOutput` 格式写回 stdout，Claude Code 自动处理。
+Claude Code 全局 Hook 通知系统。当 Claude Code 需要用户权限时，右下角弹出交互式通知窗口，按钮与终端动态一致（2 或 3 个选项），点击后以 `hookSpecificOutput` 格式回复 stdout，Claude Code 自动处理。
 
 ## 构建与测试
 
@@ -50,11 +50,14 @@ Claude Code 触发 PermissionRequest
   │ stdin: JSON {tool_input: {description, command}}
   ▼
 Hook 脚本 (.claude/hooks/PermissionRequest)
-  ├─ Python 解析 JSON → 构建按钮 (Yes|allow / No|deny)
+  ├─ Python 解析 JSON → 提取 tool_input, permission_suggestions
+  ├─ 根据 suggestions 动态决定按钮:
+  │   localSettings → Allow | Allow and remember | Deny (3项)
+  │   其他/无       → Allow | Deny (2项)
   ├─ 启动 ConsoleApp1.exe → 显示弹窗并等待
-  ├─ 用户点击 → exe 写行为值到临时文件
+  ├─ 用户点击 → exe 写行为值 (allow/allowRemember/deny) 到临时文件
   ├─ 读取结果 → 去掉 UTF-8 BOM
-  └─ stdout: {"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow|deny"}}}
+  └─ stdout: hookSpecificOutput {behavior: allow|deny}
   ▼
 Claude Code 接收响应 → 自动批准或拒绝
 ```

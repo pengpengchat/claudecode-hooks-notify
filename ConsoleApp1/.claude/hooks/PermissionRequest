@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code PermissionRequest Hook
-# 显示交互式弹窗，按钮 allow/deny，正确回复 hookSpecificOutput 格式
+# 匹配 Claude Code 实际 JSON 格式，弹窗选项与终端一致
 
 NOTIFY_APP="C:/Users/Administrator/Desktop/claudecode全局hooks/ConsoleApp1/ConsoleApp1/bin/Release/net8.0-windows/ConsoleApp1.exe"
 
@@ -11,21 +11,17 @@ if [ ! -f "$NOTIFY_APP" ]; then
     fi
 fi
 
-# 读取 stdin (hook 事件 JSON)
 INPUT=$(cat 2>/dev/null || true)
 if [ -z "$INPUT" ]; then
     exit 0
 fi
 
-# 创建临时文件 (用于 IPC 传递结果)
 RESULT_FILE=$(mktemp -p /tmp claude_result_XXXXXX.txt 2>/dev/null || echo "/tmp/claude_result_$$.txt")
 
-TITLE="Claude Code — 权限请求"
+TITLE=""
 MSG=""
 ACTIONS=""
-BEHAVIOR_MAP=""
 
-# 用 Python 解析 JSON
 PARSED=$(PYTHONIOENCODING=utf-8 python3 -c "
 import sys, json
 
@@ -33,25 +29,35 @@ d = json.loads(sys.stdin.read())
 ti = d.get('tool_input', {})
 desc = ti.get('description', '') or ''
 cmd = ti.get('command', '') or ''
+tool = d.get('tool_name', '') or ''
 
 # 构建消息
 if cmd:
-    c = cmd[:100] + ('...' if len(cmd) > 100 else '')
-    msg = c
+    c = cmd[:120] + ('...' if len(cmd) > 120 else '')
+    msg = f'[{tool}] {c}' if tool else c
     if desc and desc != cmd:
         msg = f'{desc}\n{c}'
 else:
-    msg = desc or '请查看终端进行操作'
+    msg = desc or f'[{tool}] 需要授权'
 
-# 按钮: label|behavior
-# allow = 批准, deny = 拒绝
-ACTIONS_STR = 'Yes|allow||Yes, and do not ask again|allow||No|deny'
+title = f'Claude Code — {tool} 权限' if tool else 'Claude Code — 权限请求'
 
-print(f'TITLE:{TITLE}')
+# 根据 suggestion 动态决定选项数
+# localSettings = 可持久化记住 → 3 选项: Allow / Allow and remember / Deny
+# session = 仅本次 / 无 suggestion → 2 选项: Allow / Deny
+suggestions = d.get('permission_suggestions', [])
+has_local = any(s.get('destination') == 'localSettings' for s in suggestions) if suggestions else False
+if has_local:
+    actions = 'Allow|allow||Allow and remember|allowRemember||Deny|deny'
+else:
+    actions = 'Allow|allow||Deny|deny'
+
+print(f'TITLE:{title}')
 print(f'MSG:{msg}')
-print(f'ACTIONS:{ACTIONS_STR}')
+print(f'ACTIONS:{actions}')
 " 2>/dev/null <<< "$INPUT" || true)
 
+# Bash 解析
 if [ -n "$PARSED" ]; then
     while IFS=: read -r key value; do
         value="${value%%[$'\r']*}"
@@ -63,14 +69,10 @@ if [ -n "$PARSED" ]; then
     done <<< "$PARSED"
 fi
 
-if [ -z "$MSG" ]; then
-    MSG="请查看终端进行操作"
-fi
-if [ -z "$ACTIONS" ]; then
-    ACTIONS="Yes|allow||Yes, and do not ask again|allow||No|deny"
-fi
+if [ -z "$MSG" ]; then MSG="请查看终端进行操作"; fi
+if [ -z "$ACTIONS" ]; then ACTIONS="Allow|allow||Deny|deny"; fi
 
-# 启动通知程序并等待
+# 启动弹窗并等待
 "$NOTIFY_APP" \
     --title "$TITLE" \
     --msg "$MSG" \
@@ -81,16 +83,19 @@ fi
     --sound on \
     >/dev/null 2>&1
 
-# 读取用户选择结果 (去掉 UTF-8 BOM)
+# 读取结果
 RESULT=""
 if [ -f "$RESULT_FILE" ]; then
     RESULT=$(sed 's/^\xef\xbb\xbf//' "$RESULT_FILE" 2>/dev/null | tr -d '[:space:]' || cat "$RESULT_FILE")
 fi
 
-# 输出响应到 stdout (Claude Code 官方格式)
+# 输出响应
 if [ -n "$RESULT" ]; then
     case "$RESULT" in
         allow)
+            echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+            ;;
+        allowRemember)
             echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
             ;;
         deny)
@@ -99,7 +104,5 @@ if [ -n "$RESULT" ]; then
     esac
 fi
 
-# 清理
 rm -f "$RESULT_FILE" 2>/dev/null || true
-
 exit 0
