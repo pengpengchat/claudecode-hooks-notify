@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash 'C:\\Users\\Administrator\\Desktop\\claudecode全局hooks\\ConsoleApp1\\.claude\\hooks\\PermissionRequest'",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

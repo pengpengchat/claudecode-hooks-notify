@@ -1,0 +1,105 @@
+#!/bin/bash
+# Claude Code PermissionRequest Hook
+# 显示交互式弹窗，按钮 allow/deny，正确回复 hookSpecificOutput 格式
+
+NOTIFY_APP="C:/Users/Administrator/Desktop/claudecode全局hooks/ConsoleApp1/ConsoleApp1/bin/Release/net8.0-windows/ConsoleApp1.exe"
+
+if [ ! -f "$NOTIFY_APP" ]; then
+    NOTIFY_APP="${NOTIFY_APP/\/Release\//\/Debug\/}"
+    if [ ! -f "$NOTIFY_APP" ]; then
+        exit 0
+    fi
+fi
+
+# 读取 stdin (hook 事件 JSON)
+INPUT=$(cat 2>/dev/null || true)
+if [ -z "$INPUT" ]; then
+    exit 0
+fi
+
+# 创建临时文件 (用于 IPC 传递结果)
+RESULT_FILE=$(mktemp -p /tmp claude_result_XXXXXX.txt 2>/dev/null || echo "/tmp/claude_result_$$.txt")
+
+TITLE="Claude Code — 权限请求"
+MSG=""
+ACTIONS=""
+BEHAVIOR_MAP=""
+
+# 用 Python 解析 JSON
+PARSED=$(PYTHONIOENCODING=utf-8 python3 -c "
+import sys, json
+
+d = json.loads(sys.stdin.read())
+ti = d.get('tool_input', {})
+desc = ti.get('description', '') or ''
+cmd = ti.get('command', '') or ''
+
+# 构建消息
+if cmd:
+    c = cmd[:100] + ('...' if len(cmd) > 100 else '')
+    msg = c
+    if desc and desc != cmd:
+        msg = f'{desc}\n{c}'
+else:
+    msg = desc or '请查看终端进行操作'
+
+# 按钮: label|behavior
+# allow = 批准, deny = 拒绝
+ACTIONS_STR = 'Yes|allow||Yes, and do not ask again|allow||No|deny'
+
+print(f'TITLE:{TITLE}')
+print(f'MSG:{msg}')
+print(f'ACTIONS:{ACTIONS_STR}')
+" 2>/dev/null <<< "$INPUT" || true)
+
+if [ -n "$PARSED" ]; then
+    while IFS=: read -r key value; do
+        value="${value%%[$'\r']*}"
+        case "$key" in
+            TITLE) [ -n "$value" ] && TITLE="$value" ;;
+            MSG) [ -n "$value" ] && MSG="$value" ;;
+            ACTIONS) [ -n "$value" ] && ACTIONS="$value" ;;
+        esac
+    done <<< "$PARSED"
+fi
+
+if [ -z "$MSG" ]; then
+    MSG="请查看终端进行操作"
+fi
+if [ -z "$ACTIONS" ]; then
+    ACTIONS="Yes|allow||Yes, and do not ask again|allow||No|deny"
+fi
+
+# 启动通知程序并等待
+"$NOTIFY_APP" \
+    --title "$TITLE" \
+    --msg "$MSG" \
+    --type permission \
+    --actions "$ACTIONS" \
+    --result-file "$RESULT_FILE" \
+    --timeout 30 \
+    --sound on \
+    >/dev/null 2>&1
+
+# 读取用户选择结果 (去掉 UTF-8 BOM)
+RESULT=""
+if [ -f "$RESULT_FILE" ]; then
+    RESULT=$(sed 's/^\xef\xbb\xbf//' "$RESULT_FILE" 2>/dev/null | tr -d '[:space:]' || cat "$RESULT_FILE")
+fi
+
+# 输出响应到 stdout (Claude Code 官方格式)
+if [ -n "$RESULT" ]; then
+    case "$RESULT" in
+        allow)
+            echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+            ;;
+        deny)
+            echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"User denied via notification","interrupt":true}}}'
+            ;;
+    esac
+fi
+
+# 清理
+rm -f "$RESULT_FILE" 2>/dev/null || true
+
+exit 0
