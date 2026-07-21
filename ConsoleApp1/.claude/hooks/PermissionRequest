@@ -1,0 +1,198 @@
+#!/bin/bash
+# Claude Code PermissionRequest Hook
+# 匹配 Claude Code 实际 JSON 格式，弹窗选项与终端一致
+# 支持: Bash / Write / Read / Edit / Glob / Grep / WebSearch / WebFetch / 通用
+
+NOTIFY_APP="C:/Users/Administrator/Desktop/claudecode全局hooks/ConsoleApp1/ConsoleApp1/bin/Release/net8.0-windows/ConsoleApp1.exe"
+
+if [ ! -f "$NOTIFY_APP" ]; then
+    NOTIFY_APP="${NOTIFY_APP/\/Release\//\/Debug\/}"
+    if [ ! -f "$NOTIFY_APP" ]; then
+        exit 0
+    fi
+fi
+
+INPUT=$(cat 2>/dev/null || true)
+if [ -z "$INPUT" ]; then
+    exit 0
+fi
+
+# Windows Python 无法识别 MSYS2 的 /tmp 路径，需用 cygpath 转换
+TEMP_WIN=$(cygpath -m "$TEMP" 2>/dev/null || echo "/tmp")
+RESULT_FILE=$(mktemp -p /tmp claude_result_XXXXXX.txt 2>/dev/null || echo "/tmp/claude_result_$$.txt")
+RESULT_FILE_WIN=$(cygpath -m "$RESULT_FILE" 2>/dev/null || echo "$RESULT_FILE")
+PARSE_FILE=$(mktemp -p /tmp claude_parse_XXXXXX.json 2>/dev/null || echo "/tmp/claude_parse_$$.json")
+PARSE_FILE_WIN=$(cygpath -m "$PARSE_FILE" 2>/dev/null || echo "$PARSE_FILE")
+
+# Python 解析: 提取工具信息、构建消息、写入 JSON 供 Bash 读取
+# 注意：必须指定 encoding='utf-8'，否则 Windows Python 用 GBK 打开会乱码
+PYTHONIOENCODING=utf-8 python3 -c "
+import sys, json, os
+
+d = json.loads(sys.stdin.read())
+ti = d.get('tool_input', {})
+desc = ti.get('description', '') or ''
+tool = d.get('tool_name', '') or ''
+
+# ── 按工具类型构建与终端一致的提示消息 ──
+tool_upper = tool.upper() if tool else ''
+parts = []
+
+if tool_upper == 'BASH':
+    cmd = ti.get('command', '') or ''
+    if desc and desc != cmd:
+        parts.append(desc)
+    if cmd:
+        c = cmd[:150] + ('...' if len(cmd) > 150 else '')
+        parts.append('\$ ' + c)
+    if not parts:
+        parts.append(desc or '[Bash] 需要授权')
+
+elif tool_upper == 'WRITE':
+    fp = ti.get('file_path', '') or ''
+    content = ti.get('content', '') or ''
+    if desc:
+        parts.append(desc)
+    if fp:
+        parts.append('写入文件: ' + fp)
+    if content:
+        size = len(content)
+        preview = content[:80].replace(chr(10), '\\\\n')
+        parts.append('内容: ' + str(size) + ' 字节')
+        parts.append('  ' + preview + ('...' if len(content) > 80 else ''))
+    if not parts:
+        parts.append('[Write] 写入文件: ' + fp)
+
+elif tool_upper == 'READ':
+    fp = ti.get('file_path', '') or ''
+    if desc:
+        parts.append(desc)
+    if fp:
+        parts.append('读取文件: ' + fp)
+    if not parts:
+        parts.append('[Read] 读取文件: ' + fp)
+
+elif tool_upper == 'EDIT':
+    fp = ti.get('file_path', '') or ''
+    old = ti.get('old_string', '') or ''
+    new = ti.get('new_string', '') or ''
+    if desc:
+        parts.append(desc)
+    if fp:
+        parts.append('修改文件: ' + fp)
+    if old:
+        o = old[:80].replace(chr(10), '\\\\n')
+        parts.append('原内容: \"' + o + ('...' if len(old) > 80 else '') + '\"')
+    if new:
+        n = new[:80].replace(chr(10), '\\\\n')
+        parts.append('新内容: \"' + n + ('...' if len(new) > 80 else '') + '\"')
+    if not parts:
+        parts.append('[Edit] 修改文件: ' + fp)
+
+elif tool_upper == 'GLOB':
+    pattern = ti.get('pattern', '') or ''
+    path = ti.get('path', '') or ''
+    if desc:
+        parts.append(desc)
+    parts.append('搜索模式: ' + pattern)
+    if path:
+        parts.append('搜索目录: ' + path)
+
+elif tool_upper == 'GREP':
+    pattern = ti.get('pattern', '') or ''
+    path = ti.get('path', '') or ''
+    if desc:
+        parts.append(desc)
+    parts.append('搜索内容: ' + pattern)
+    if path:
+        parts.append('搜索路径: ' + path)
+
+elif tool_upper == 'WEBSEARCH':
+    query = ti.get('query', '') or ''
+    if desc:
+        parts.append(desc)
+    parts.append('搜索: ' + query)
+
+elif tool_upper == 'WEBFETCH':
+    url = ti.get('url', '') or ''
+    prompt = ti.get('prompt', '') or ''
+    if desc:
+        parts.append(desc)
+    parts.append('获取 URL: ' + url)
+    if prompt:
+        parts.append('查询: ' + prompt[:100])
+
+else:
+    # 通用兜底: 识别各工具共有字段
+    if desc:
+        parts.append(desc)
+    for key in ['file_path', 'command', 'pattern', 'query', 'url']:
+        if key in ti and ti[key]:
+            val = str(ti[key])[:100]
+            parts.append('  ' + key + ': ' + val)
+    if not parts:
+        parts.append(('[' + tool + '] 需要授权') if tool else '需要授权')
+
+msg = chr(10).join(parts)
+title = ('Claude Code — ' + tool + ' 操作') if tool else 'Claude Code — 权限请求'
+
+# 根据 suggestion 动态决定选项数
+suggestions = d.get('permission_suggestions', [])
+has_local = any(s.get('destination') == 'localSettings' for s in suggestions) if suggestions else False
+if has_local:
+    actions = 'Allow|allow||Allow and remember|allowRemember||Deny|deny'
+else:
+    actions = 'Allow|allow||Deny|deny'
+
+# 写入 JSON (用 UTF-8 编码)
+output = {'title': title, 'msg': msg, 'actions': actions}
+with open('${PARSE_FILE_WIN}', 'w', encoding='utf-8') as f:
+    json.dump(output, f, ensure_ascii=False)
+" 2>/dev/null <<< "$INPUT" || true
+
+# Bash 读取 Python 解析结果 (必须指定 encoding='utf-8')
+if [ -f "$PARSE_FILE" ]; then
+    TITLE=$(python3 -c "import json; print(json.load(open('${PARSE_FILE_WIN}', encoding='utf-8'))['title'])" 2>/dev/null)
+    MSG=$(python3 -c "import json; print(json.load(open('${PARSE_FILE_WIN}', encoding='utf-8'))['msg'])" 2>/dev/null)
+    ACTIONS=$(python3 -c "import json; print(json.load(open('${PARSE_FILE_WIN}', encoding='utf-8'))['actions'])" 2>/dev/null)
+fi
+rm -f "$PARSE_FILE" 2>/dev/null || true
+
+if [ -z "$MSG" ]; then MSG="请查看终端进行操作"; fi
+if [ -z "$ACTIONS" ]; then ACTIONS="Allow|allow||Deny|deny"; fi
+
+# 启动弹窗并等待 (exe 需要 Windows 路径)
+"$NOTIFY_APP" \
+    --title "$TITLE" \
+    --msg "$MSG" \
+    --type permission \
+    --actions "$ACTIONS" \
+    --result-file "$RESULT_FILE_WIN" \
+    --timeout 30 \
+    --sound on \
+    --debug \
+    >/dev/null 2>&1
+
+# 读取结果 (Bash 用 MSYS2 路径)
+RESULT=""
+if [ -f "$RESULT_FILE" ]; then
+    RESULT=$(sed 's/^\xef\xbb\xbf//' "$RESULT_FILE" 2>/dev/null | tr -d '[:space:]' || cat "$RESULT_FILE")
+fi
+
+# 输出响应
+if [ -n "$RESULT" ]; then
+    case "$RESULT" in
+        allow)
+            echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+            ;;
+        allowRemember)
+            echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+            ;;
+        deny)
+            echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"User denied via notification","interrupt":true}}}'
+            ;;
+    esac
+fi
+
+rm -f "$RESULT_FILE" 2>/dev/null || true
+exit 0
